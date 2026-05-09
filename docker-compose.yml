@@ -1,0 +1,168 @@
+version: '3.8'
+
+networks:
+  dmz-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+  app-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/24
+  cage-network:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.22.0.0/24
+  identity-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.23.0.0/24
+  quarantine-network:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.24.0.0/24
+  monitoring-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/24
+
+services:
+  gaming-database:
+    image: postgres:15-alpine
+    container_name: gaming-database
+    hostname: gaming-database
+    environment:
+      POSTGRES_USER: cage_admin
+      POSTGRES_PASSWORD: SuperSecretCage123
+      POSTGRES_DB: gaming_db
+    volumes:
+      - ./db-init.sql:/docker-entrypoint-initdb.d/init.sql
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      cage-network:
+        ipv4_address: 172.22.0.10
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cage_admin -d gaming_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  gaming-app:
+    build:
+      context: ./gaming-app
+      dockerfile: Dockerfile
+    container_name: gaming-app
+    hostname: gaming-app
+    environment:
+      DB_HOST: gaming-database
+      DB_PORT: 5432
+      DB_USER: cage_admin
+      DB_PASSWORD: SuperSecretCage123
+      DB_NAME: gaming_db
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: casino
+    ports:
+      - "5000:5000"
+    depends_on:
+      gaming-database:
+        condition: service_healthy
+    networks:
+      app-network:
+        ipv4_address: 172.21.0.10
+      cage-network:
+        ipv4_address: 172.22.0.20
+      identity-network:
+        ipv4_address: 172.23.0.20
+      monitoring-network:
+        ipv4_address: 172.25.0.20
+    restart: unless-stopped
+
+  web-server:
+    image: nginx:alpine
+    container_name: web-server
+    hostname: web-server
+    ports:
+      - "8888:80"
+    volumes:
+      - ./web/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./web/index.html:/usr/share/nginx/html/index.html:ro
+    depends_on:
+      - gaming-app
+    networks:
+      dmz-network:
+        ipv4_address: 172.20.0.10
+      app-network:
+        ipv4_address: 172.21.0.30
+    restart: unless-stopped
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:23.0
+    container_name: keycloak
+    hostname: keycloak
+    command: start-dev --import-realm
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin123
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./keycloak/casino-realm.json:/opt/keycloak/data/import/casino-realm.json:ro
+    networks:
+      identity-network:
+        ipv4_address: 172.23.0.10
+    restart: unless-stopped
+
+  attacker-box:
+    image: nicolaka/netshoot
+    container_name: attacker-box
+    hostname: attacker-box
+    command: sleep infinity
+    networks:
+      dmz-network:
+        ipv4_address: 172.20.0.100
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: grafana
+    hostname: grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: casino123
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./monitoring/provisioning:/etc/grafana/provisioning
+      - ./monitoring/dashboards:/var/lib/grafana/dashboards
+      - grafana_data:/var/lib/grafana
+    networks:
+      monitoring-network:
+        ipv4_address: 172.25.0.10
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: prometheus
+    hostname: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    networks:
+      monitoring-network:
+        ipv4_address: 172.25.0.30
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  grafana_data:
